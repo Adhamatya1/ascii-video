@@ -146,7 +146,11 @@
     if (!video.videoWidth) return;
     // بنختار حجم الخط بحيث الـ canvas يطلع بالظبط بعرض الشاشة المتاح —
     // أي تصغير CSS لاحق كان بيعمل تموّجات moiré على النص الدقيق
-    const availW = Math.min(window.innerWidth - 60, 1700);
+    // بنرسم ببكسلات الجهاز الفعلية (الموبايل DPR بتاعه 2-3) وبنعرض بمقاس CSS —
+    // من غير كده الموبايل بياخد شبكة مهزوزة والخلفية الشبحية بتبان أكتر من الحروف
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    const cssW = Math.min(window.innerWidth - 60, 1700);
+    const availW = cssW * dpr;
     // أقل من 6px الحروف بتبقى عجينة — على الشاشات الصغيرة بنقلّل الأعمدة بدلها
     gcols = Math.min(cols, Math.floor(availW / (6 * 0.6)));
     CELL_H = Math.max(6, Math.floor(availW / gcols / 0.6));
@@ -165,6 +169,9 @@
     sample.height = rows * 2;
     ascii.width  = Math.ceil(gcols * CELL_W);
     ascii.height = rows * CELL_H;
+    // العرض بمقاس CSS: كل بكسل canvas بيقع على بكسل جهاز فعلي واحد
+    ascii.style.width  = (ascii.width / dpr) + 'px';
+    ascii.style.height = (ascii.height / dpr) + 'px';
     // تغيير أبعاد الـ canvas بيصفّر إعداداته، فلازم نرجّعها هنا
     ctx.font = FONT;
     ctx.textBaseline = 'top';
