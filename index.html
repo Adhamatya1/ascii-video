@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ASCII Video — فيديو من حروف</title>
+<style>
+  :root {
+    --bg: #0a0a0f;
+    --panel: #14141c;
+    --accent: #4ade80;
+    --text: #d4d4d8;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 14px;
+    padding: 18px;
+  }
+  h1 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: 1px;
+  }
+  #stage {
+    position: relative;
+    max-width: 100%;
+    border: 1px solid #26262f;
+    border-radius: 8px;
+    overflow: hidden;
+    background: #000;
+  }
+  #ascii {
+    display: block;
+    max-width: 100%;
+    height: auto;
+    cursor: pointer;
+  }
+  #overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0,0,0,.55);
+    cursor: pointer;
+    transition: opacity .25s;
+  }
+  #overlay.hidden { opacity: 0; pointer-events: none; }
+  #overlay span {
+    font-size: 4rem;
+    color: var(--accent);
+    text-shadow: 0 0 30px rgba(74,222,128,.5);
+  }
+  #controls {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    background: var(--panel);
+    padding: 10px 18px;
+    border-radius: 8px;
+    flex-wrap: wrap;
+    justify-content: center;
+  }
+  button {
+    background: var(--accent);
+    color: #062b14;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 22px;
+    font-size: .95rem;
+    font-weight: 700;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  button:hover { filter: brightness(1.1); }
+  label { display: flex; align-items: center; gap: 8px; font-size: .85rem; }
+  input[type=range] { accent-color: var(--accent); }
+  #fps { font-size: .8rem; color: #71717a; min-width: 70px; }
+  video { display: none; }
+</style>
+</head>
+<body>
+  <h1>ASCII VIDEO ◂ الفيديو كلّه حروف ▸</h1>
+
+  <div id="stage">
+    <canvas id="ascii"></canvas>
+    <div id="overlay"><span>▶</span></div>
+  </div>
+
+  <div id="controls">
+    <button id="playBtn">تشغيل</button>
+    <label>
+      الدقة (عدد الحروف بالعرض)
+      <input type="range" id="cols" min="80" max="320" step="10" value="240">
+      <span id="colsVal">240</span>
+    </label>
+    <span id="fps"></span>
+  </div>
+
+  <video id="video" src="video.mp4" loop playsinline preload="auto"></video>
+
+  <footer style="font-size:.7rem;color:#52525b">
+    الفيديو: تريلر فيلم <a href="https://durian.blender.org" style="color:#71717a">Sintel</a> — © Blender Foundation (CC-BY 3.0)
+  </footer>
+
+<script>
+(() => {
+  const video   = document.getElementById('video');
+  const ascii   = document.getElementById('ascii');
+  const overlay = document.getElementById('overlay');
+  const playBtn = document.getElementById('playBtn');
+  const colsInp = document.getElementById('cols');
+  const colsVal = document.getElementById('colsVal');
+  const fpsEl   = document.getElementById('fps');
+
+  const ctx = ascii.getContext('2d'); // لازم alpha عشان خدعة الـ compositing تحت
+
+  // canvas مصغّر للقراءة فقط — منه بنسحب ألوان البكسلات
+  const sample = document.createElement('canvas');
+  const sctx = sample.getContext('2d', { willReadFrequently: true });
+
+  // سلّم الحروف من الأغمق للأفتح، بينتهي بمكعب مصمت للمناطق الساطعة جدًا
+  const RAMP = ' .,:;-=+*oahkbdW#%@█';
+
+  // حروف الأرباع: كل حرف بيمثّل نمط 2×2 بكسلات — بنستخدمها عند الحواف
+  // الفهرس = بتات البكسلات الساطعة: TL=8, TR=4, BL=2, BR=1
+  const QUAD = [' ', '▗', '▖', '▄', '▝', '▐', '▞', '▟', '▘', '▚', '▌', '▙', '▀', '▜', '▛', '█'];
+  // فرق سطوع داخل الخلية أكبر من كده = حافة → حرف أرباع بدل حرف السلّم
+  const EDGE_T = 50;
+
+  const meas = document.createElement('canvas').getContext('2d');
+
+  let cols = +colsInp.value, rows = 0, fatal = false;
+  // gcols = الأعمدة الفعلية بعد التقليم للشاشات الصغيرة (الموبايل)
+  let gcols = cols, CELL_W = 0, CELL_H = 0, FONT = '', quadOK = true;
+
+  function resize() {
+    if (!video.videoWidth) return;
+    // بنختار حجم الخط بحيث الـ canvas يطلع بالظبط بعرض الشاشة المتاح —
+    // أي تصغير CSS لاحق كان بيعمل تموّجات moiré على النص الدقيق
+    const availW = Math.min(window.innerWidth - 60, 1700);
+    // أقل من 6px الحروف بتبقى عجينة — على الشاشات الصغيرة بنقلّل الأعمدة بدلها
+    gcols = Math.min(cols, Math.floor(availW / (6 * 0.6)));
+    CELL_H = Math.max(6, Math.floor(availW / gcols / 0.6));
+    FONT = `bold ${CELL_H}px "Cascadia Mono", "Consolas", monospace`;
+    meas.font = FONT;
+    // عرض الخلية = العرض الفعلي للحرف في الخط، عشان السطر المرسوم كنص واحد
+    // يتطابق بالظبط مع شبكة البكسلات اللي بنلوّن بيها
+    CELL_W = meas.measureText('█').width;
+    // لو الخط بيرسم حروف الأرباع بعرض مختلف الشبكة هتتكسر — نرجع للسلّم بس
+    quadOK = Math.abs(meas.measureText('▞').width - CELL_W) < 0.01 &&
+             Math.abs(meas.measureText('a').width - CELL_W) < 0.01;
+    // نحافظ على نسبة أبعاد الفيديو مع تعويض إن الخلية مستطيلة مش مربعة
+    rows = Math.round(gcols * (video.videoHeight / video.videoWidth) * (CELL_W / CELL_H));
+    // بنقرا الفيديو بضعف دقة الشبكة: 4 عينات سطوع لكل خلية (2×2)
+    sample.width = gcols * 2;
+    sample.height = rows * 2;
+    ascii.width  = Math.ceil(gcols * CELL_W);
+    ascii.height = rows * CELL_H;
+    // تغيير أبعاد الـ canvas بيصفّر إعداداته، فلازم نرجّعها هنا
+    ctx.font = FONT;
+    ctx.textBaseline = 'top';
+    // الصفحة dir=rtl والـ canvas بيورثها — من غير دول السطر هيترسم بره الحدود
+    ctx.direction = 'ltr';
+    ctx.textAlign = 'left';
+  }
+
+  let frames = 0, lastFps = performance.now();
+
+  function render() {
+    if (video.readyState >= 2 && rows > 0) {
+      const sw = gcols * 2, sh = rows * 2;
+      sctx.drawImage(video, 0, 0, sw, sh);
+      let img, px;
+      try {
+        img = sctx.getImageData(0, 0, sw, sh);
+        px = img.data;
+      } catch (e) {
+        // فتح الصفحة كـ file:// بيمنع قراءة البكسلات — لازم سيرفر محلي
+        fatal = true;
+        video.pause();
+        overlay.querySelector('span').style.fontSize = '1.3rem';
+        overlay.querySelector('span').textContent =
+          'افتح الصفحة من السيرفر المحلي (شغّل run.sh) — المتصفح بيمنع قراءة الفيديو من file://';
+        overlay.classList.remove('hidden');
+        return;
+      }
+
+      ctx.clearRect(0, 0, ascii.width, ascii.height);
+
+      const boost = (i, lum) => {
+        px[i]     = Math.min(255, (lum + (px[i]     - lum) * 1.3) * 1.25);
+        px[i + 1] = Math.min(255, (lum + (px[i + 1] - lum) * 1.3) * 1.25);
+        px[i + 2] = Math.min(255, (lum + (px[i + 2] - lum) * 1.3) * 1.25);
+      };
+
+      // المرحلة 1: بناء كل سطر كنص كامل من 4 عينات سطوع لكل خلية:
+      // خلية متجانسة → حرف من السلّم حسب متوسط السطوع (الملمس النصّي)
+      // خلية فيها حافة → حرف أرباع بيطابق نمط البكسلات الساطعة (الحدّة)
+      const lines = new Array(rows);
+      const ratio = RAMP.length / 255;
+      for (let y = 0; y < rows; y++) {
+        const top = (y * 2) * sw * 4, bot = (y * 2 + 1) * sw * 4;
+        let line = '';
+        for (let x = 0; x < gcols; x++) {
+          const i00 = top + (x * 2) * 4, i01 = i00 + 4;
+          const i10 = bot + (x * 2) * 4, i11 = i10 + 4;
+          // معادلة الإدراك البشري للسطوع (Rec. 601) للعينات الأربع
+          const l00 = 0.299 * px[i00] + 0.587 * px[i00 + 1] + 0.114 * px[i00 + 2];
+          const l01 = 0.299 * px[i01] + 0.587 * px[i01 + 1] + 0.114 * px[i01 + 2];
+          const l10 = 0.299 * px[i10] + 0.587 * px[i10 + 1] + 0.114 * px[i10 + 2];
+          const l11 = 0.299 * px[i11] + 0.587 * px[i11 + 1] + 0.114 * px[i11 + 2];
+          const avg = (l00 + l01 + l10 + l11) / 4;
+          const min = Math.min(l00, l01, l10, l11), max = Math.max(l00, l01, l10, l11);
+          if (max < 10) { line += ' '; continue; }
+          // تشبيع 1.3× وإضاءة 1.25× للعينات الأربع — على المصفوفة الصغيرة
+          // ده أرخص بكتير من ctx.filter أو رسم الفيديو مرتين بالحجم الكامل
+          boost(i00, l00); boost(i01, l01); boost(i10, l10); boost(i11, l11);
+          if (quadOK && max - min > EDGE_T) {
+            // حافة: البتات بترتيب TL=8, TR=4, BL=2, BR=1
+            line += QUAD[(l00 >= avg ? 8 : 0) | (l01 >= avg ? 4 : 0) | (l10 >= avg ? 2 : 0) | (l11 >= avg ? 1 : 0)];
+          } else {
+            // تصحيح gamma بسيط بيوزّع الحروف أحسن على درجات السطوع المتوسطة
+            line += RAMP[Math.min(RAMP.length - 1, (Math.pow(avg / 255, 0.8) * 255 * ratio) | 0)];
+          }
+        }
+        lines[y] = line;
+      }
+      sctx.putImageData(img, 0, 0);
+
+      // رسم كل سطر بنداء fillText واحد (عشرات النداءات بدل آلاف لكل فريم)
+      ctx.fillStyle = '#fff';
+      for (let y = 0; y < rows; y++) ctx.fillText(lines[y], 0, y * CELL_H);
+
+      // المرحلة 2: التلوين — العينة (ضعف دقة الشبكة) بتترسم فوق قناع الحروف
+      // بوضع source-in مع تنعيم، فالألوان بتتدرّج جوّه الحرف الواحد
+      ctx.globalCompositeOperation = 'source-in';
+      ctx.imageSmoothingEnabled = true;
+      ctx.drawImage(sample, 0, 0, ascii.width, ascii.height);
+
+      // المرحلة 3: خلفية شبحية — نسخة معتمة من الفريم بتملا الفراغات
+      // فالعين بتقرا المشهد كامل والحروف الساطعة فوقه
+      ctx.globalCompositeOperation = 'destination-over';
+      ctx.globalAlpha = 0.3;
+      ctx.drawImage(sample, 0, 0, ascii.width, ascii.height);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, ascii.width, ascii.height);
+      ctx.globalCompositeOperation = 'source-over';
+
+      frames++;
+      const now = performance.now();
+      if (now - lastFps >= 1000) {
+        fpsEl.textContent = frames + ' fps';
+        frames = 0;
+        lastFps = now;
+      }
+    }
+    requestAnimationFrame(render);
+  }
+
+  function toggle() {
+    if (fatal) return;
+    if (video.paused) {
+      video.play();
+      overlay.classList.add('hidden');
+      playBtn.textContent = 'إيقاف';
+    } else {
+      video.pause();
+      overlay.classList.remove('hidden');
+      playBtn.textContent = 'تشغيل';
+    }
+  }
+
+  playBtn.addEventListener('click', toggle);
+  overlay.addEventListener('click', toggle);
+  ascii.addEventListener('click', toggle);
+  colsInp.addEventListener('input', () => {
+    cols = +colsInp.value;
+    colsVal.textContent = cols;
+    resize();
+  });
+  video.addEventListener('loadedmetadata', resize);
+  window.addEventListener('resize', resize);
+
+  requestAnimationFrame(render);
+})();
+</script>
+</body>
+</html>
