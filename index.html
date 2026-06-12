@@ -39,6 +39,7 @@
   }
   #ascii {
     display: block;
+    direction: ltr;
     max-width: 100%;
     height: auto;
     cursor: pointer;
@@ -141,6 +142,8 @@
   let cols = +colsInp.value, rows = 0, fatal = false;
   // gcols = الأعمدة الفعلية بعد التقليم للشاشات الصغيرة (الموبايل)
   let gcols = cols, CELL_W = 0, CELL_H = 0, FONT = '', quadOK = true;
+  // السلّم بعد استبدال أي حرف عرضه مختلف عن المرجع (يتبنى في resize)
+  let RAMP_SAFE = RAMP;
 
   function resize() {
     if (!video.videoWidth) return;
@@ -156,12 +159,16 @@
     CELL_H = Math.max(6, Math.floor(availW / gcols / 0.6));
     FONT = `bold ${CELL_H}px "Cascadia Mono", "Consolas", monospace`;
     meas.font = FONT;
-    // عرض الخلية = العرض الفعلي للحرف في الخط، عشان السطر المرسوم كنص واحد
-    // يتطابق بالظبط مع شبكة البكسلات اللي بنلوّن بيها
-    CELL_W = meas.measureText('█').width;
-    // لو الخط بيرسم حروف الأرباع بعرض مختلف الشبكة هتتكسر — نرجع للسلّم بس
-    quadOK = Math.abs(meas.measureText('▞').width - CELL_W) < 0.01 &&
-             Math.abs(meas.measureText('a').width - CELL_W) < 0.01;
+    // المرجع حرف لاتيني — أكيد موجود في خط monospace الأساسي بعرض الخلية القياسي.
+    // مهم نقيس بيه مش بـ █ لأن █ نفسه ممكن ييجي من خط بديل بعرض مختلف على أندرويد
+    CELL_W = meas.measureText('M').width;
+    const sameW = ch => Math.abs(meas.measureText(ch).width - CELL_W) < 0.05;
+    // السطر بيترسم بنداء fillText واحد، فأي حرف عرضه مختلف بيزحزح كل اللي بعده
+    // ويمزّق الصورة. بنستبدل أي حرف بعرض مختلف (البلوك لو جه من خط رموز بديل)
+    // بحرف ASCII آمن، فالسطر كله يفضل على شبكة منتظمة على أي جهاز
+    RAMP_SAFE = Array.from(RAMP, ch => (ch === ' ' || sameW(ch)) ? ch : '@').join('');
+    // الأرباع تتفعّل فقط لو كلها بنفس عرض المرجع (غير كده بتكسر الشبكة)
+    quadOK = QUAD.every((ch, i) => i === 0 || sameW(ch));
     // نحافظ على نسبة أبعاد الفيديو مع تعويض إن الخلية مستطيلة مش مربعة
     rows = Math.round(gcols * (video.videoHeight / video.videoWidth) * (CELL_W / CELL_H));
     // بنقرا الفيديو بضعف دقة الشبكة: 4 عينات سطوع لكل خلية (2×2)
@@ -213,7 +220,7 @@
       // خلية متجانسة → حرف من السلّم حسب متوسط السطوع (الملمس النصّي)
       // خلية فيها حافة → حرف أرباع بيطابق نمط البكسلات الساطعة (الحدّة)
       const lines = new Array(rows);
-      const ratio = RAMP.length / 255;
+      const ratio = RAMP_SAFE.length / 255;
       for (let y = 0; y < rows; y++) {
         const top = (y * 2) * sw * 4, bot = (y * 2 + 1) * sw * 4;
         let line = '';
@@ -236,7 +243,7 @@
             line += QUAD[(l00 >= avg ? 8 : 0) | (l01 >= avg ? 4 : 0) | (l10 >= avg ? 2 : 0) | (l11 >= avg ? 1 : 0)];
           } else {
             // تصحيح gamma بسيط بيوزّع الحروف أحسن على درجات السطوع المتوسطة
-            line += RAMP[Math.min(RAMP.length - 1, (Math.pow(avg / 255, 0.8) * 255 * ratio) | 0)];
+            line += RAMP_SAFE[Math.min(RAMP_SAFE.length - 1, (Math.pow(avg / 255, 0.8) * 255 * ratio) | 0)];
           }
         }
         lines[y] = line;
@@ -244,6 +251,8 @@
       sctx.putImageData(img, 0, 0);
 
       // رسم كل سطر بنداء fillText واحد (عشرات النداءات بدل آلاف لكل فريم)
+      // تثبيت الاتجاه LTR كل فريم — تأمين ضد أي جهاز بيرجّع الـ canvas لـ rtl
+      ctx.direction = 'ltr';
       ctx.fillStyle = '#fff';
       for (let y = 0; y < rows; y++) ctx.fillText(lines[y], 0, y * CELL_H);
 
