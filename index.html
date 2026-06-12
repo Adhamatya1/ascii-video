@@ -247,18 +247,14 @@
       ctx.fillStyle = '#fff';
       for (let y = 0; y < rows; y++) ctx.fillText(lines[y], 0, y * CELL_H);
 
-      // المرحلة 2: التلوين — العينة (ضعف دقة الشبكة) بتترسم فوق قناع الحروف
-      // بوضع source-in مع تنعيم، فالألوان بتتدرّج جوّه الحرف الواحد
+      // المرحلة 2: التلوين — العينة بتترسم فوق قناع الحروف بوضع source-in
+      // من غير تنعيم: كل حرف لون مصمت واضح، مش تدرّج بيحاكي الفيديو الأصلي
       ctx.globalCompositeOperation = 'source-in';
-      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingEnabled = false;
       ctx.drawImage(sample, 0, 0, ascii.width, ascii.height);
 
-      // المرحلة 3: خلفية شبحية — نسخة معتمة من الفريم بتملا الفراغات
-      // فالعين بتقرا المشهد كامل والحروف الساطعة فوقه
+      // المرحلة 3: خلفية سوداء — الصورة كلها من الحروف وبس
       ctx.globalCompositeOperation = 'destination-over';
-      ctx.globalAlpha = 0.3;
-      ctx.drawImage(sample, 0, 0, ascii.width, ascii.height);
-      ctx.globalAlpha = 1;
       ctx.fillStyle = '#000';
       ctx.fillRect(0, 0, ascii.width, ascii.height);
       ctx.globalCompositeOperation = 'source-over';
