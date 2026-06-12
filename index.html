@@ -100,7 +100,7 @@
     <button id="playBtn">تشغيل</button>
     <label>
       الدقة (عدد الحروف بالعرض)
-      <input type="range" id="cols" min="80" max="320" step="10" value="240">
+      <input type="range" id="cols" min="80" max="700" step="10" value="240">
       <span id="colsVal">240</span>
     </label>
     <span id="fps"></span>
@@ -145,6 +145,12 @@
   // السلّم بعد استبدال أي حرف عرضه مختلف عن المرجع (يتبنى في resize)
   let RAMP_SAFE = RAMP;
 
+  // Auto-levels: مدى السطوع الفعلي للمشهد (متنعّم زمنيًا عشان ما يرفّش)
+  let loLevel = 0, hiLevel = 255;
+  const hist = new Uint32Array(256);
+  // مخزن أخطاء الـ dithering: سطرين (الحالي واللي بعده)، بيتبني في resize
+  let errCur = new Float32Array(0), errNext = new Float32Array(0);
+
   function resize() {
     if (!video.videoWidth) return;
     // بنختار حجم الخط بحيث الـ canvas يطلع بالظبط بعرض الشاشة المتاح —
@@ -176,6 +182,9 @@
     sample.height = rows * 2;
     ascii.width  = Math.ceil(gcols * CELL_W);
     ascii.height = rows * CELL_H;
+    // +2 هامش يمين عشان توزيع الخطأ لـ x+1 من غير فحص حدود
+    errCur = new Float32Array(gcols + 2);
+    errNext = new Float32Array(gcols + 2);
     // العرض بمقاس CSS: كل بكسل canvas بيقع على بكسل جهاز فعلي واحد
     ascii.style.width  = (ascii.width / dpr) + 'px';
     ascii.style.height = (ascii.height / dpr) + 'px';
@@ -185,6 +194,8 @@
     // الصفحة dir=rtl والـ canvas بيورثها — من غير دول السطر هيترسم بره الحدود
     ctx.direction = 'ltr';
     ctx.textAlign = 'left';
+    // الشاشة ليها سقف فيزيائي (حرف ≥ 6px) — بنعرض الرقم الفعلي بصراحة
+    colsVal.textContent = gcols < cols ? cols + ' (الفعلي ' + gcols + ')' : String(cols);
   }
 
   let frames = 0, lastFps = performance.now();
@@ -210,17 +221,25 @@
 
       ctx.clearRect(0, 0, ascii.width, ascii.height);
 
-      const boost = (i, lum) => {
-        px[i]     = Math.min(255, (lum + (px[i]     - lum) * 1.3) * 1.25);
-        px[i + 1] = Math.min(255, (lum + (px[i + 1] - lum) * 1.3) * 1.25);
-        px[i + 2] = Math.min(255, (lum + (px[i + 2] - lum) * 1.3) * 1.25);
+      // g = كسب الإضاءة التكيّفي من الـ auto-levels (1 في المشاهد الساطعة)
+      const boost = (i, lum, g) => {
+        px[i]     = Math.min(255, (lum + (px[i]     - lum) * 1.3) * 1.25 * g);
+        px[i + 1] = Math.min(255, (lum + (px[i + 1] - lum) * 1.3) * 1.25 * g);
+        px[i + 2] = Math.min(255, (lum + (px[i + 2] - lum) * 1.3) * 1.25 * g);
       };
 
       // المرحلة 1: بناء كل سطر كنص كامل من 4 عينات سطوع لكل خلية:
       // خلية متجانسة → حرف من السلّم حسب متوسط السطوع (الملمس النصّي)
       // خلية فيها حافة → حرف أرباع بيطابق نمط البكسلات الساطعة (الحدّة)
       const lines = new Array(rows);
-      const ratio = RAMP_SAFE.length / 255;
+      const QMAX = RAMP_SAFE.length - 1;
+      // Auto-levels بقيم الفريم السابق (متنعّمة): فرد مدى سطوع المشهد على السلّم كله
+      const range = Math.max(20, hiLevel - loLevel);
+      const S = l => { const v = (l - loLevel) * 255 / range; return v < 0 ? 0 : v > 255 ? 255 : v; };
+      hist.fill(0);
+      let histN = 0;
+      errCur.fill(0); errNext.fill(0);
+
       for (let y = 0; y < rows; y++) {
         const top = (y * 2) * sw * 4, bot = (y * 2 + 1) * sw * 4;
         let line = '';
@@ -232,23 +251,50 @@
           const l01 = 0.299 * px[i01] + 0.587 * px[i01 + 1] + 0.114 * px[i01 + 2];
           const l10 = 0.299 * px[i10] + 0.587 * px[i10 + 1] + 0.114 * px[i10 + 2];
           const l11 = 0.299 * px[i11] + 0.587 * px[i11 + 1] + 0.114 * px[i11 + 2];
-          const avg = (l00 + l01 + l10 + l11) / 4;
-          const min = Math.min(l00, l01, l10, l11), max = Math.max(l00, l01, l10, l11);
-          if (max < 10) { line += ' '; continue; }
-          // تشبيع 1.3× وإضاءة 1.25× للعينات الأربع — على المصفوفة الصغيرة
-          // ده أرخص بكتير من ctx.filter أو رسم الفيديو مرتين بالحجم الكامل
-          boost(i00, l00); boost(i01, l01); boost(i10, l10); boost(i11, l11);
+          const avgRaw = (l00 + l01 + l10 + l11) / 4;
+          if (Math.max(l00, l01, l10, l11) < 8) { line += ' '; continue; }
+          hist[avgRaw | 0]++; histN++;
+          // بعد فرد التباين: القيم اللي بيتبني عليها اختيار الحرف
+          const s00 = S(l00), s01 = S(l01), s10 = S(l10), s11 = S(l11);
+          const avg = (s00 + s01 + s10 + s11) / 4;
+          const min = Math.min(s00, s01, s10, s11), max = Math.max(s00, s01, s10, s11);
+          // كسب لوني تكيّفي: المشهد الغامق بينوّر بنفس نسبة فرد التباين (مخفّفة)
+          const g = Math.min(2.2, Math.max(1, 1 + (avg / (avgRaw + 1) - 1) * 0.7));
+          // تشبيع 1.3× وإضاءة تكيّفية للعينات الأربع — على المصفوفة الصغيرة
+          boost(i00, l00, g); boost(i01, l01, g); boost(i10, l10, g); boost(i11, l11, g);
           if (quadOK && max - min > EDGE_T) {
             // حافة: البتات بترتيب TL=8, TR=4, BL=2, BR=1
-            line += QUAD[(l00 >= avg ? 8 : 0) | (l01 >= avg ? 4 : 0) | (l10 >= avg ? 2 : 0) | (l11 >= avg ? 1 : 0)];
+            line += QUAD[(s00 >= avg ? 8 : 0) | (s01 >= avg ? 4 : 0) | (s10 >= avg ? 2 : 0) | (s11 >= avg ? 1 : 0)];
           } else {
-            // تصحيح gamma بسيط بيوزّع الحروف أحسن على درجات السطوع المتوسطة
-            line += RAMP_SAFE[Math.min(RAMP_SAFE.length - 1, (Math.pow(avg / 255, 0.8) * 255 * ratio) | 0)];
+            // gamma + توزيع الخطأ Floyd–Steinberg: التدرجات بتبقى ناعمة بدل banding
+            let Lg = Math.pow(avg / 255, 0.8) * 255 + errCur[x + 1];
+            Lg = Lg < 0 ? 0 : Lg > 255 ? 255 : Lg;
+            const gi = Math.min(QMAX, Math.round(Lg * QMAX / 255));
+            line += RAMP_SAFE[gi];
+            const err = Lg - gi * 255 / QMAX;
+            errCur[x + 2]  += err * 0.4375; // 7/16 → يمين
+            errNext[x]     += err * 0.1875; // 3/16 → تحت-شمال
+            errNext[x + 1] += err * 0.3125; // 5/16 → تحت
+            errNext[x + 2] += err * 0.0625; // 1/16 → تحت-يمين
           }
         }
         lines[y] = line;
+        const tmp = errCur; errCur = errNext; errNext = tmp;
+        errNext.fill(0);
       }
       sctx.putImageData(img, 0, 0);
+
+      // تحديث مستويات الفريم الجاي من توزيع سطوع الفريم ده (المئين 2% و98%)
+      if (histN > 50) {
+        const loN = histN * 0.02, hiN = histN * 0.98;
+        let acc = 0, lo = 0, hi = 255;
+        for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= loN) { lo = i; break; } }
+        acc = 0;
+        for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= hiN) { hi = i; break; } }
+        // تنعيم زمني — من غيره تغيّر الإضاءة بين الفريمات بيبان وميض مزعج
+        loLevel += (Math.min(lo, 100) - loLevel) * 0.12;
+        hiLevel += (Math.max(hi, loLevel + 40) - hiLevel) * 0.12;
+      }
 
       // رسم كل سطر بنداء fillText واحد (عشرات النداءات بدل آلاف لكل فريم)
       // تثبيت الاتجاه LTR كل فريم — تأمين ضد أي جهاز بيرجّع الـ canvas لـ rtl
@@ -297,8 +343,7 @@
   ascii.addEventListener('click', toggle);
   colsInp.addEventListener('input', () => {
     cols = +colsInp.value;
-    colsVal.textContent = cols;
-    resize();
+    resize(); // بيحدّث colsVal بالرقم الفعلي بعد التقليم
   });
   video.addEventListener('loadedmetadata', resize);
   window.addEventListener('resize', resize);
